@@ -1,10 +1,8 @@
 /*
  *
- *  ---POZNAMKY---
- * Snazil som sa vsetko popisat v komentaroch, a strukturovat aby to bolo viac-menej citatelne.
  *
  *  ---BONUSOVE ULOHY---
- *  Spravil som to na vsetky bonusove. Dufam teda ze stream-ove cykly nie je zakazane pouzivat.
+ *  Spravil som to na VSETKY bonusove. Dufam teda ze stream-ove cykly nie je zakazane pouzivat.
  * No teda a "if podobne" volania typu map.computeIfAbsent apod.
  *
  * Tu validaciu som spravil tak, ze ak sa chyti nejaky exception, tak sa abortne tranzakcia, teda je to pre rozne
