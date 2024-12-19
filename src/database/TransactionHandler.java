@@ -3,6 +3,8 @@ package database;
 import java.io.*;
 import java.net.Socket;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.*;
@@ -15,6 +17,8 @@ public class TransactionHandler implements Runnable{
     BufferedReader reader;
     private final Map<String, List<String>> localChanges;
 
+    private final Map<String, ReentrantLock> tableLocks;
+
     private final Map<String, List<String>> data;
     private final ArrayList<String> transaction = new ArrayList<>();
 
@@ -22,12 +26,11 @@ public class TransactionHandler implements Runnable{
     private final Map<String, Consumer<List<String>>> commandHandlers = new HashMap<>();
     private final Map<String, Runnable> specialCommands = new HashMap<>();
 
-    private final ArrayList<String> synchronizedTabels = new ArrayList<>();
-
     public TransactionHandler(Socket socket, Map<String, List<String>> data) throws IOException {
         this.socket = socket;
         this.data = data;
         localChanges = new HashMap<>();
+        this.tableLocks = new ConcurrentHashMap<>();
 
         commandHandlers.put("CREATE", this::handleCreateCommand);
         commandHandlers.put("SELECT", this::handleSelectCommand);
@@ -38,29 +41,36 @@ public class TransactionHandler implements Runnable{
         specialCommands.put("ABORT", this::abortHandler);
     }
     private void commitHandler(){
-        transaction.forEach(this::handleCommand);
+        try {
+            transaction.forEach(this::handleCommand);
 
-        //Zapisanie do globalnej databazy
-        synchronized (data) {
+            synchronized (data) {
+                List<String> tablesToLock = new ArrayList<>(localChanges.keySet());
+                lockTablesInOrder(tablesToLock);
 
-            synchronizedTabels.forEach(table -> {
-                data.put(table, localChanges.get(table));
-            });
+                try {
+                    localChanges.forEach((table, changes) -> data.put(table, new ArrayList<>(changes)));
+                } finally {
+                    unlockTablesInOrder(tablesToLock);
+                }
+            }
 
-            localChanges.keySet().stream().filter(table -> !synchronizedTabels.contains(table))
-                    .forEach(table -> data.get(table).addAll(localChanges.get(table)));
+            writer.println("Commited.");
+            writer.flush();
+            transaction.clear();
+        } catch (Exception e) {
+            writer.println("Error during commit: " + e.getMessage() + ". Transaction aborted.");
+            e.printStackTrace();
+            abortHandler();
+        } finally {
+            closeConnection();
         }
-
-        System.out.println("Commited.");
-        writer.print("Commited. \n");
-        writer.flush();
-        transaction.clear();
-        closeConnection();
     }
     private void abortHandler() {
         transaction.clear();
         writer.print("Aborted. \n");
         writer.flush();
+        unlockTablesInOrder(tableLocks.keySet().stream().toList());
         closeConnection();
     }
 
@@ -82,8 +92,9 @@ public class TransactionHandler implements Runnable{
             commandHandlers
                     .getOrDefault(parts.getFirst(), (x) -> {throw new IllegalArgumentException("Unknown command: " + x.getFirst());})
                     .accept(parts);
-        }catch (IllegalArgumentException e){
+        }catch (Exception e) {
             writer.println("Error: " + e.getMessage() + ". Transaction aborted.");
+            e.printStackTrace();
             abortHandler();
         }
     }
@@ -113,30 +124,55 @@ public class TransactionHandler implements Runnable{
     }
     private void handleInsertCommand(List<String> parts){
         String tableName = parts.get(2);
-        mergeTables(tableName);
-        localChanges.get(tableName).addAll(List.of(parts.get(4).split(",")));
+
+        acquireTableLock(tableName);
+        try {
+            mergeTables(tableName);
+            localChanges.get(tableName).addAll(List.of(parts.get(4).split(",")));
+        } finally {
+            releaseTableLock(tableName);
+        }
     }
     private void handleDeleteCommand(List<String> parts){
         String tableName = parts.get(2);
-        mergeTables(tableName);
+
+        acquireTableLock(tableName);
         try{
+            mergeTables(tableName);
             localChanges.get(tableName).removeIf(word -> word.startsWith(parts.get(4)));
         }catch(IndexOutOfBoundsException e){
             localChanges.get(tableName).clear();
+        } catch (Exception e) {
+            throw new RuntimeException("Error while deleting: " + e.getMessage(), e);
         }
+        finally {
+            releaseTableLock(tableName);
+        }
+    }
+
+    //metody na pracu s zamkami
+    private void acquireTableLock(String tableName) {
+        tableLocks.computeIfAbsent(tableName, _ -> new ReentrantLock()).lock();
+    }
+    private void releaseTableLock(String tableName) {
+        tableLocks.computeIfAbsent(tableName, _ -> new ReentrantLock()).unlock();
+    }
+    private void lockTablesInOrder(List<String> tables){
+        tables.stream().sorted().forEach(this::acquireTableLock);
+    }
+    private void unlockTablesInOrder(List<String> tables){
+        tables.stream().sorted().forEach(this::releaseTableLock);
     }
 
     //Vybral som si takyto sposob synchronizacie, lebo podla mna je kopirovat celu databazu do localChanges
     //moze byt casovo narocne pri velkych databazach, preto si beirem len potrebne tabulky.
-    private void  mergeTables(String tableName){
+    private void mergeTables(String tableName) {
         List<String> globalData = data.getOrDefault(tableName, new ArrayList<>());
         List<String> localData = localChanges.getOrDefault(tableName, new ArrayList<>());
 
-        // Merge without duplicates
         localChanges.put(tableName, Stream.concat(globalData.stream(), localData.stream())
-                                        .distinct()
-                                        .collect(Collectors.toList()));
-        synchronizedTabels.add(tableName);
+                .distinct()
+                .collect(Collectors.toList()));
     }
 
     @Override
