@@ -26,7 +26,7 @@ public class TransactionHandler implements Runnable{
     private final Map<String, Consumer<List<String>>> commandHandlers = new HashMap<>();
     private final Map<String, Runnable> specialCommands = new HashMap<>();
 
-    public TransactionHandler(Socket socket, Map<String, List<String>> data) throws IOException {
+    public TransactionHandler(Socket socket, Map<String, List<String>> data) {
         this.socket = socket;
         this.data = data;
         localChanges = new HashMap<>();
@@ -92,7 +92,11 @@ public class TransactionHandler implements Runnable{
             commandHandlers
                     .getOrDefault(parts.getFirst(), (x) -> {throw new IllegalArgumentException("Unknown command: " + x.getFirst());})
                     .accept(parts);
-        }catch (Exception e) {
+        }catch (IllegalArgumentException e) {
+            writer.println("Error, wrong command: " + e.getMessage());
+            e.printStackTrace();
+        }
+        catch (Exception e) {
             writer.println("Error: " + e.getMessage() + ". Transaction aborted.");
             e.printStackTrace();
             abortHandler();
@@ -185,9 +189,17 @@ public class TransactionHandler implements Runnable{
             writer.flush();
             reader.lines().forEach(line -> {
                 System.out.println("Processing: " + line);
+
+                //Ak je to chybny prikaz, tak sa vypise chyba a abortne sa tranzakcia
+                Stream.concat(commandHandlers.keySet().stream(), specialCommands.keySet().stream()).filter(line::startsWith).findFirst()
+                        .orElseThrow(() -> {
+                            writer.println("Error, wrong command: " + line);
+                            abortHandler();
+                            return new IllegalArgumentException("Unknown command: " + line);
+                        });
+
                 specialCommands.getOrDefault(line, () -> transaction.add(line)).run();
             });
-
         }catch (IOException e) {
             writer.println("Error while reading commands: " + e.getMessage());
             e.printStackTrace();
