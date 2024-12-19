@@ -23,5 +23,5 @@ So basically data are stored in Map<String List<String>> structure. The key is t
 - GUI for the server
 - Graphical representation of the data
 - Graphical representation of statistics (memory, load, connections, etc.)
-- Probably something with the web (REST API, etc.)
+- Probably something with the web
 - Need to think of something special to add to the project :)
