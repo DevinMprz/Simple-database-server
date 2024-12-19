@@ -3,8 +3,11 @@ package database;
 import java.io.*;
 import java.net.Socket;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.stream.*;
 
 public class TransactionHandler implements Runnable{
 
@@ -12,7 +15,9 @@ public class TransactionHandler implements Runnable{
     private final Socket socket;
     private PrintWriter writer;
     BufferedReader reader;
-    private Map<String, List<String>> localChanges;
+    private final Map<String, List<String>> localChanges;
+
+    private final Map<String, ReentrantLock> tableLocks;
 
     private final Map<String, List<String>> data;
     private final ArrayList<String> transaction = new ArrayList<>();
@@ -24,7 +29,8 @@ public class TransactionHandler implements Runnable{
     public TransactionHandler(Socket socket, Map<String, List<String>> data) throws IOException {
         this.socket = socket;
         this.data = data;
-        localChanges = new HashMap<>(data);
+        localChanges = new HashMap<>();
+        this.tableLocks = new ConcurrentHashMap<>();
 
         commandHandlers.put("CREATE", this::handleCreateCommand);
         commandHandlers.put("SELECT", this::handleSelectCommand);
@@ -35,17 +41,36 @@ public class TransactionHandler implements Runnable{
         specialCommands.put("ABORT", this::abortHandler);
     }
     private void commitHandler(){
-        transaction.forEach(this::handleCommand);
-        System.out.println("Commited.");
-        writer.print("Commited. \n");
-        writer.flush();
-        transaction.clear();
-        closeConnection();
+        try {
+            transaction.forEach(this::handleCommand);
+
+            synchronized (data) {
+                List<String> tablesToLock = new ArrayList<>(localChanges.keySet());
+                lockTablesInOrder(tablesToLock);
+
+                try {
+                    localChanges.forEach((table, changes) -> data.put(table, new ArrayList<>(changes)));
+                } finally {
+                    unlockTablesInOrder(tablesToLock);
+                }
+            }
+
+            writer.println("Commited.");
+            writer.flush();
+            transaction.clear();
+        } catch (Exception e) {
+            writer.println("Error during commit: " + e.getMessage() + ". Transaction aborted.");
+            e.printStackTrace();
+            abortHandler();
+        } finally {
+            closeConnection();
+        }
     }
     private void abortHandler() {
         transaction.clear();
         writer.print("Aborted. \n");
         writer.flush();
+        unlockTablesInOrder(tableLocks.keySet().stream().toList());
         closeConnection();
     }
 
@@ -67,39 +92,87 @@ public class TransactionHandler implements Runnable{
             commandHandlers
                     .getOrDefault(parts.getFirst(), (x) -> {throw new IllegalArgumentException("Unknown command: " + x.getFirst());})
                     .accept(parts);
-        }catch (IllegalArgumentException e){
+        }catch (Exception e) {
             writer.println("Error: " + e.getMessage() + ". Transaction aborted.");
+            e.printStackTrace();
             abortHandler();
         }
     }
     private void handleCreateCommand(List<String> parts){
         String tableName = parts.get(2);
-        data.put(tableName, new ArrayList<>());
+        localChanges.put(tableName, new ArrayList<>());
     }
     private void handleSelectCommand(List<String> parts){
         String tableName = parts.get(2);
+
         String filterCriteria = parts.stream()
                 .skip(4)
                 .findFirst()
                 .orElse("");
+        //Viem, ze by sa toto dalo aj tak, ale nie som si isty, ze to sa nepovažuje za "if"
+        // String filterCriteria = parts.size() > 4 ? parts.get(4) : "";
+
+        mergeTables(tableName);
+
+        System.out.println("Merged table: " + tableName + " " + localChanges.get(tableName));
         writer.print("Words from table " + tableName + " that starts with " + filterCriteria + ": ");
             writer.println(
-                    data.get(tableName).stream()
+                    localChanges.get(tableName).stream()
                             .filter(word -> word.startsWith(filterCriteria))
                             .collect(Collectors.joining(", ")));
             writer.flush();
     }
     private void handleInsertCommand(List<String> parts){
         String tableName = parts.get(2);
-        data.get(tableName).addAll(List.of(parts.get(4).split(",")));
+
+        acquireTableLock(tableName);
+        try {
+            mergeTables(tableName);
+            localChanges.get(tableName).addAll(List.of(parts.get(4).split(",")));
+        } finally {
+            releaseTableLock(tableName);
+        }
     }
     private void handleDeleteCommand(List<String> parts){
         String tableName = parts.get(2);
+
+        acquireTableLock(tableName);
         try{
-            data.get(tableName).removeIf(word -> word.startsWith(parts.get(4)));
+            mergeTables(tableName);
+            localChanges.get(tableName).removeIf(word -> word.startsWith(parts.get(4)));
         }catch(IndexOutOfBoundsException e){
-            data.get(tableName).clear();
+            localChanges.get(tableName).clear();
+        } catch (Exception e) {
+            throw new RuntimeException("Error while deleting: " + e.getMessage(), e);
         }
+        finally {
+            releaseTableLock(tableName);
+        }
+    }
+
+    //metody na pracu s zamkami
+    private void acquireTableLock(String tableName) {
+        tableLocks.computeIfAbsent(tableName, _ -> new ReentrantLock()).lock();
+    }
+    private void releaseTableLock(String tableName) {
+        tableLocks.computeIfAbsent(tableName, _ -> new ReentrantLock()).unlock();
+    }
+    private void lockTablesInOrder(List<String> tables){
+        tables.stream().sorted().forEach(this::acquireTableLock);
+    }
+    private void unlockTablesInOrder(List<String> tables){
+        tables.stream().sorted().forEach(this::releaseTableLock);
+    }
+
+    //Vybral som si takyto sposob synchronizacie, lebo podla mna je kopirovat celu databazu do localChanges
+    //moze byt casovo narocne pri velkych databazach, preto si beirem len potrebne tabulky.
+    private void mergeTables(String tableName) {
+        List<String> globalData = data.getOrDefault(tableName, new ArrayList<>());
+        List<String> localData = localChanges.getOrDefault(tableName, new ArrayList<>());
+
+        localChanges.put(tableName, Stream.concat(globalData.stream(), localData.stream())
+                .distinct()
+                .collect(Collectors.toList()));
     }
 
     @Override
