@@ -26,11 +26,11 @@ public class TransactionHandler implements Runnable{
     private final Map<String, Consumer<List<String>>> commandHandlers = new HashMap<>();
     private final Map<String, Runnable> specialCommands = new HashMap<>();
 
-    public TransactionHandler(Socket socket, Map<String, List<String>> data) {
+    public TransactionHandler(Socket socket, Map<String, List<String>> data, Map<String, ReentrantLock> tableLocks) {
+        this.tableLocks = tableLocks;
         this.socket = socket;
         this.data = data;
         localChanges = new HashMap<>();
-        this.tableLocks = new ConcurrentHashMap<>();
 
         commandHandlers.put("CREATE", this::handleCreateCommand);
         commandHandlers.put("SELECT", this::handleSelectCommand);
@@ -133,8 +133,12 @@ public class TransactionHandler implements Runnable{
         try {
             mergeTables(tableName);
             localChanges.get(tableName).addAll(List.of(parts.get(4).split(",")));
-        } finally {
-            releaseTableLock(tableName);
+        }catch (Exception e) {
+            writer.println("Error: " + e.getMessage() + ". Transaction aborted.");
+            e.printStackTrace();
+            abortHandler();
+        }finally {
+              releaseTableLock(tableName);
         }
     }
     private void handleDeleteCommand(List<String> parts){

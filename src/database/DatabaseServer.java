@@ -30,11 +30,14 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
+
 public class DatabaseServer{
     private final Map<String, List<String>> data = new ConcurrentHashMap<>();
 
     //preco som pouzil executor je popisane hore.
     private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final Map<String, ReentrantLock> tableLocks = new ConcurrentHashMap<>();
 
     private ServerSocket serverSocket;
     private Thread serverThread;
@@ -49,7 +52,7 @@ public class DatabaseServer{
                 while (!serverSocket.isClosed()) {
                     Socket clientSocket = serverSocket.accept();
                     System.out.println("Nove pripojenie!");
-                    executor.submit(new TransactionHandler(clientSocket, data));
+                    executor.submit(new TransactionHandler(clientSocket, data, tableLocks));
                 }
             }catch (Exception e){
                 System.out.println("Error while starting server: " + e.getMessage());
